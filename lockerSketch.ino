@@ -20,12 +20,17 @@
 #define TAKEN 1
 #define OPEN 0
 #define LOOPS_TO_HR 36000
+#define WATHCHDOG_LIMIT 50 //5 seconds limit
 
 #define ACTIVE_LOW_RELAY
 
 struct QuadState
 {
   bool s[4];
+};
+struct QuadCount
+{
+  int c[4];
 };
 
 //lock access (TAKEN/OPEN)
@@ -34,6 +39,11 @@ QuadState gLockLed;
 QuadState gLock;
 //button state (per poll per set)
 QuadState gBtn;
+
+//avoid holding solenoid lock if button jams in
+QuadState gWatchDogHit;
+QuadCount gWatchDogCnt;
+
 //how many hours till locking
 unsigned short gLkTmr;
 //no available pins to allow for interupt based timer.
@@ -42,6 +52,7 @@ unsigned int gHrTmr;
 //perserve last state of button/switch to trigger event on changed state
 bool gLastTToggle; //for changing time
 bool gLastLToggle; //for locking/unlocking all in admin mode
+bool gLastAMode; //check if admin mode was just entered
 
 //TODO: add watchdog timer for held lock buttons
  
@@ -92,8 +103,12 @@ void setup()
 
   gLastTToggle = false;
   gLastLToggle = false;
+  gLastAMode = false;
 
   gHrTmr = LOOPS_TO_HR;
+
+  //start watchdog with clean slate (no open locks)
+  watchdogTick();
 
   showLockState();
   Serial.println("SYSTEM INITIALIZED....");
@@ -105,11 +120,9 @@ void loop()
   bool activeTimer = false;
   bool toggleLock = false;
 
-  gHrTmr--;
-
 //button routines==================================================================================================
+  //admin setup----------------------------------------------------------------------------------------------------
   delay(25);
-  //admin setup
   readBtn(0);
   adminMode = gBtn.s[0];
   activeTimer = gBtn.s[1];
@@ -124,13 +137,14 @@ void loop()
     gLkTmr = 0;
   }
 
-  if((adminMode) && (toggleLock != gLastLToggle))
+  if((adminMode) && (toggleLock != gLastLToggle) && gLastAMode)
   {
     setAllState(toggleLock ? TAKEN : OPEN);
   }
-  gLastLToggle = toggleLock; 
+  gLastLToggle = toggleLock;
+  gLastAMode =  adminMode;
 
-  //front button
+  //front button---------------------------------------------------------------------------------------------------
   delay(25);
   readBtn(1);
   if(adminMode)
@@ -148,7 +162,7 @@ void loop()
     }
   }
 
-  //rear button
+  //rear button----------------------------------------------------------------------------------------------------
   delay(25);
   readBtn(2);
   for(int i = 0; i < 4; i++)
@@ -166,12 +180,12 @@ void loop()
   }
   else { gLastTToggle = false; }
 
-  //for future improvements/debug
+  //for future improvements/debug --------------------------------------------------------------------------------
   delay(25);
   readBtn(3);
   //add code as needed
 
-//show results ===============================================================================================
+//show results ===================================================================================================
   //display state
   if(adminMode)
   {
@@ -182,11 +196,31 @@ void loop()
     showLockState();
   }
 
+  watchdogTick();
   triggerLock();
 
+  //check for timer event (reaching an hour)
+  gHrTmr--;
   if(!gHrTmr)
   {
     hrHit();
+  }
+}
+
+void watchdogTick()
+{
+  for(int i = 0; i < 4; i++)
+  {
+    if(gWatchDogHit.s[i])
+    {
+      if(!gLock.s[i]) { gWatchDogCnt.c[i] = 0; }
+    }
+    else
+    {
+      gWatchDogCnt.c[i] = gLock.s[i] ? gWatchDogCnt.c[i]+1 : 0;
+    }
+
+    gWatchDogHit.s[i] = (gWatchDogCnt.c[i] >= WATHCHDOG_LIMIT);
   }
 }
 
@@ -218,9 +252,9 @@ void triggerLock()
   for(int i = 0; i < 4; i++)
   {
 #ifdef ACTIVE_LOW_RELAY
-    digitalWrite(i+LCK_A, !gLock.s[i]);
+    digitalWrite(i+LCK_A, !(gLock.s[i] && !gWatchDogHit.s[i]));
 #else
-    digitalWrite(i+LCK_A, gLock.s[i]);
+    digitalWrite(i+LCK_A, (gLock.s[i] && !gWatchDogHit.s[i]));
 #endif
   }
 }
